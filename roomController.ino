@@ -1,80 +1,65 @@
-#include <WiFiNINA.h>
+// Good reference: https://github.com/njanssen/arduino-nano-33-ble
+#include <ArduinoBLE.h>
+#include <Arduino_APDS9960.h>
 
-#include "./network.h" // Sets SSID and pass variables
-#include "./stateServer.h"
+#define NANO_33_BLE_SERVICE_UUID(val) ("e905de3e-" val "-44de-92c4-bb6e04fb0212")
 
-const int buttonPin = 2;
-const int ledPin = 4;
-bool buttonHandled = false;
-
-StateServer stateServer("192.168.1.17", 2000);
-
-int status = WL_IDLE_STATUS;
-
-WiFiServer server(80);
+String name;
+BLEService service(NANO_33_BLE_SERVICE_UUID("0000"));
+BLECharacteristic lightCharacteristic(NANO_33_BLE_SERVICE_UUID("2001"), BLENotify, 4 * sizeof(unsigned short));  // Array of 16-bit, RGB ambient
 
 void setup() {
   Serial.begin(9600);
 
-  pinMode(buttonPin, INPUT);
-  pinMode(ledPin, OUTPUT);
+  Serial.print("Attempting to connect to ble: ");
 
-  Serial.print("Attempting to connect to network: ");
-  Serial.println(ssid);
-  status = WiFi.begin(ssid, pass);
-
-  if (status != WL_CONNECTED) {
-    Serial.print("Could not connect to network.");
-    while (true)
+  if (!BLE.begin() || !APDS.begin()) {
+    Serial.println("Failled to initialized!");
+    while (1)
       ;
   }
-  Serial.println("Connected");
 
-  server.begin();
-  stateServer.onConnected(subscribeState);
-  stateServer.initialize();
-}
+  String address = BLE.address();
+  address.toUpperCase();
+  name = "Nano33BLESense-";
+  name += address[address.length() - 5];
+  name += address[address.length() - 4];
+  name += address[address.length() - 2];
+  name += address[address.length() - 1];
 
-void printNetworkInfo(Stream &stream) {
-  stream.println("Board Information:");
-  stream.print("IP Address: ");
-  stream.println(WiFi.localIP());
-  stream.println("Network Information:");
-  stream.print("SSID: ");
-  stream.println(WiFi.SSID());
-  stream.print("signal strength (RSSI):");
-  stream.println(WiFi.RSSI());
+  BLE.setLocalName(name.c_str());
+  BLE.setDeviceName(name.c_str());
+
+  BLE.setEventHandler(BLEConnected, bleConnected);
+  BLE.setEventHandler(BLEDisconnected, bleDisconnected);
+
+  service.addCharacteristic(lightCharacteristic);
+
+  BLE.addService(service);
+  BLE.setAdvertisedService(service);
+  BLE.advertise();
 }
 
 void handleCommand(String command, Stream &stream) {
   if (command == "status") {
-    printNetworkInfo(stream);
+    Serial.print("Name = ");
+    Serial.println(name);
+
+    Serial.print("Address: ");
+    Serial.println(BLE.address());
   } else {
     stream.println("Unkown command");
   }
 }
 
-void handleClient(WiFiClient client) {
-  if (!client.connected()) {
-    client.stop();
-    return;
-  }
-
-  if (client.available() > 0) {
-    String command = client.readString();
-    command.trim();
-    if (command == "exit") {
-      client.println("Closing connection");
-      client.stop();
-      return;
-    }
-
-    handleCommand(command, client);
-  }
+void bleConnected(BLEDevice central) {
+  Serial.print("Connected event, central: ");
+  Serial.println(central.address());
 }
 
-void subscribeState() {
-    stateServer.send("subscribe", "bluOS", "streamer");
+void bleDisconnected(BLEDevice central) {
+  Serial.print("Disconnect event, central: ");
+  Serial.println(central.address());
 }
 
 void loop() {
@@ -84,22 +69,16 @@ void loop() {
     handleCommand(command, Serial);
   }
 
-  if (WiFiClient newClient = server.available()) {
-    handleClient(newClient);
+  if (!BLE.connected()) {
+    return;
   }
 
-  if (stateServer.available()) {
-    JsonObject stateServerUpdate = stateServer.getNextMessage();
-    digitalWrite(ledPin, (boolean)stateServerUpdate["playing"]);
-  }
+  if (lightCharacteristic.subscribed() && APDS.colorAvailable()) {
+    int r, g, b, ambientLight;
 
-  int buttonState = digitalRead(buttonPin);
-  if (buttonState == HIGH && !buttonHandled) {
-    buttonHandled = true;
+    APDS.readColor(r, g, b, ambientLight);
 
-    char *args[] = { "toggle" };
-    stateServer.send("action", "bluOS", "streamer", args, 1);
-  } else if (buttonState == LOW && buttonHandled) {
-    buttonHandled = false;
+    unsigned short colors[4] = {r, g, b, ambientLight};
+    lightCharacteristic.writeValue(colors, sizeof(colors));
   }
 }
